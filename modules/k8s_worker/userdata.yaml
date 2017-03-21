@@ -1,0 +1,111 @@
+#cloud-config
+coreos:
+  update:
+    reboot-strategy: "etcd-lock"
+  units:
+  - name: update-engine.service
+    command: stop
+  - name: locksmithd.service
+    command: stop
+  - name: kubelet.service
+    enable: true
+    command: "start"
+    content: |
+      [Unit]
+      Description=Kubernetes Kubelet
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=kube_install_weave_cni.service
+      Requires=kube_install_weave_cni.service
+
+      [Service]
+      EnvironmentFile=/etc/environment
+      ExecStartPre=/usr/bin/mkdir -p /etc/kubernetes/manifests
+      ExecStartPre=/usr/bin/mkdir -p /srv/kubernetes/bin
+      ExecStartPre=/usr/bin/curl -fsSL -o /srv/kubernetes/bin/kubelet https://storage.googleapis.com/kubernetes-release/release/v${kubernetes_version}/bin/linux/amd64/kubelet
+      ExecStartPre=/usr/bin/chmod +x /srv/kubernetes/bin/kubelet
+      ExecStartPre=/usr/bin/curl -fSsL -o /srv/kubernetes/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/v${kubernetes_version}/bin/linux/amd64/kubectl
+      ExecStartPre=/usr/bin/chmod +x /srv/kubernetes/bin/kubectl
+      ExecStart=/srv/kubernetes/bin/kubelet \
+      --allow-privileged=true \
+      --pod-manifest-path=/etc/kubernetes/manifests \
+      --cluster_dns=${service_dns_ip} \
+      --hostname-override=$${COREOS_PRIVATE_IPV4} \
+      --cluster_domain=cluster.local \
+      --cadvisor-port=0 \
+      --cloud-provider=aws \
+      --cni-conf-dir=/etc/cni/net.d \
+      --network-plugin=cni \
+      --kubeconfig=/etc/kubernetes/kubeconfig \
+      --require-kubeconfig=true
+
+      Restart=on-failure
+      RestartSec=5
+      TimeoutSec=30
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: kube_install_weave_cni.service
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Kubernetes CNI weave install service
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      ExecStartPre=/usr/bin/mkdir -p /opt/cni/bin
+      ExecStartPre=/usr/bin/mkdir -p /etc/cni/net.d
+      ExecStartPre=/usr/bin/curl -fsSL -o /tmp/cni-amd64-v${cni_plugin_version}.tbz2 https://github.com/containernetworking/cni/releases/download/v${cni_plugin_version}/cni-amd64-v${cni_plugin_version}.tbz2
+      ExecStartPre=/usr/bin/tar xv -f /tmp/cni-amd64-v${cni_plugin_version}.tbz2 -C /opt/cni/bin/
+      ExecStartPre=/usr/bin/curl -L git.io/weave -o /opt/cni/bin/weave
+      ExecStartPre=/usr/bin/chmod a+x  /opt/cni/bin/weave
+      ExecStart=/opt/cni/bin/weave setup
+
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+write_files:
+    - path: "/etc/kubernetes/manifests/kube-proxy.yaml"
+      content: |
+         apiVersion: v1
+         kind: Pod
+         metadata:
+            name: kube-proxy
+            namespace: kube-system
+         spec:
+            hostNetwork: true
+            containers:
+            - name: kube-proxy
+              image: gcr.io/google_containers/hyperkube:v${kubernetes_version}
+              command:
+              - /hyperkube
+              - proxy
+              - --master=${kube_api_url}
+              - --kubeconfig=/etc/kubernetes/kubeconfig
+              - --bind-address=${replace("%private_ipv4", "%", "$")}
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /etc/ssl/certs
+                name: "ssl-certs"
+              - mountPath: /etc/kubernetes
+                name: "kubeconfig"
+                readOnly: true
+              - mountPath: /etc/kubernetes/ssl
+                name: "etc-kube-ssl"
+                readOnly: true
+            volumes:
+            - name: "ssl-certs"
+              hostPath:
+                path: "/etc/ssl/certs"
+            - name: "kubeconfig"
+              hostPath:
+                path: "/etc/kubernetes"
+            - name: "etc-kube-ssl"
+              hostPath:
+                path: "/etc/kubernetes/ssl"

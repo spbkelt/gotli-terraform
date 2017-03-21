@@ -1,0 +1,220 @@
+#cloud-config
+coreos:
+  update:
+    reboot-strategy: "etcd-lock"
+  units:
+  - name: update-engine.service
+    command: stop
+  - name: locksmithd.service
+    command: stop
+  - name: kubelet.service
+    enable: true
+    command: "start"
+    content: |
+      [Unit]
+      Description=Kubernetes Kubelet
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=kube_install_weave_cni.service
+      Requires=kube_install_weave_cni.service
+
+      [Service]
+      EnvironmentFile=/etc/environment
+      ExecStartPre=/usr/bin/mkdir -p /etc/kubernetes/manifests
+      ExecStartPre=/usr/bin/mkdir -p /srv/kubernetes/bin
+      ExecStartPre=/usr/bin/curl -fsSL -o /srv/kubernetes/bin/kubelet https://storage.googleapis.com/kubernetes-release/release/v${kubernetes_version}/bin/linux/amd64/kubelet
+      ExecStartPre=/usr/bin/chmod +x /srv/kubernetes/bin/kubelet
+      ExecStartPre=/usr/bin/curl -fSsL -o /srv/kubernetes/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/v${kubernetes_version}/bin/linux/amd64/kubectl
+      ExecStartPre=/usr/bin/chmod +x /srv/kubernetes/bin/kubectl
+      ExecStart=/srv/kubernetes/bin/kubelet \
+      --allow-privileged=true \
+      --pod-manifest-path=/etc/kubernetes/manifests \
+      --cluster_dns=${service_dns_ip} \
+      --hostname-override=$${COREOS_PRIVATE_IPV4} \
+      --cluster_domain=cluster.local \
+      --cadvisor-port=0 \
+      --cloud-provider=aws \
+      --cni-conf-dir=/etc/cni/net.d \
+      --network-plugin=cni \
+      --kubeconfig=/etc/kubernetes/kubeconfig \
+      --require-kubeconfig=true
+
+      Restart=on-failure
+      RestartSec=5
+      TimeoutSec=30
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: kube_install_weave_cni.service
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Kubernetes CNI weave install service
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      ExecStartPre=/usr/bin/mkdir -p /opt/cni/bin
+      ExecStartPre=/usr/bin/mkdir -p /etc/cni/net.d
+      ExecStartPre=/usr/bin/curl -fsSL -o /tmp/cni-amd64-v${cni_plugin_version}.tbz2 https://github.com/containernetworking/cni/releases/download/v${cni_plugin_version}/cni-amd64-v${cni_plugin_version}.tbz2
+      ExecStartPre=/usr/bin/tar xv -f /tmp/cni-amd64-v${cni_plugin_version}.tbz2 -C /opt/cni/bin/
+      ExecStartPre=/usr/bin/curl -L git.io/weave -o /opt/cni/bin/weave
+      ExecStartPre=/usr/bin/chmod a+x  /opt/cni/bin/weave
+      ExecStart=/opt/cni/bin/weave setup
+
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: kube_install_couchbase.service
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Kubernetes CNI weave install service
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=kubelet.service
+      Requires=kubelet.service
+
+      [Service]
+      ExecStart=/srv/kubernetes/bin/kubectl apply -f /etc/kubernetes/manifests/database.yaml --kubeconfig /etc/kubernetes/kubeconfig
+
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: kube_setup_couchbase.service
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Couchbase default bucket setup service
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=kube_install_couchbase.service
+      Requires=kube_install_couchbase.service
+
+      [Service]
+      ExecStart=/usr/bin/curl -u ${db_user}:${db_password} -v -X POST "http://couchbase.default.svc.cluster.local:8091/pools/default/buckets" -d 'flushEnabled=1&threadsNumber=3&replicaIndex=0&replicaNumber=0&evictionPolicy=valueOnly&ramQuotaMB=512&bucketType=membase&name=default&authType=sasl&saslPassword='
+
+      Restart=on-failure
+      RestartSec=5
+      TimeoutSec=15
+
+      [Install]
+      WantedBy=multi-user.target
+
+write_files:
+    - path: "/etc/kubernetes/manifests/kube-proxy.yaml"
+      content: |
+         apiVersion: v1
+         kind: Pod
+         metadata:
+            name: kube-proxy
+            namespace: kube-system
+         spec:
+            hostNetwork: true
+            containers:
+            - name: kube-proxy
+              image: gcr.io/google_containers/hyperkube:v${kubernetes_version}
+              command:
+              - /hyperkube
+              - proxy
+              - --master=${kube_api_url}
+              - --kubeconfig=/etc/kubernetes/kubeconfig
+              - --bind-address=${replace("%private_ipv4", "%", "$")}
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /etc/ssl/certs
+                name: "ssl-certs"
+              - mountPath: /etc/kubernetes
+                name: "kubeconfig"
+                readOnly: true
+              - mountPath: /etc/kubernetes/ssl
+                name: "etc-kube-ssl"
+                readOnly: true
+            volumes:
+            - name: "ssl-certs"
+              hostPath:
+                path: "/etc/ssl/certs"
+            - name: "kubeconfig"
+              hostPath:
+                path: "/etc/kubernetes"
+            - name: "etc-kube-ssl"
+              hostPath:
+                path: "/etc/kubernetes/ssl"
+    - path: /etc/kubernetes/manifests/database.yaml
+      content: |
+        kind: PersistentVolume
+        apiVersion: v1
+        metadata:
+          name: couchbase-pv
+          labels:
+            type: amazonEBS
+        spec:
+          capacity:
+            storage: 15Gi
+          accessModes:
+            - ReadWriteOnce
+          awsElasticBlockStore:
+            volumeID: ${aws_db_pv_id}
+            fsType: ext4
+        ---
+        apiVersion: apps/v1beta1
+        kind: StatefulSet
+        metadata:
+          name: couchbase
+        spec:
+          serviceName: "couchbase"
+          replicas: 1
+          template:
+            metadata:
+              name: couchbase-ss-pod
+              labels:
+                app: couchbase
+                name: couchbase-ss-pod
+                context: couchbase-pv
+            spec:
+              containers:
+              - name: couchbase-ss-pod
+                image: couchbase
+                resources:
+                  requests:
+                    memory: "1024Mi"
+                    cpu: "1"
+                  limits:
+                    memory: "2048Mi"
+                    cpu: "1"
+                volumeMounts:
+                - mountPath: "/opt/couchbase/var"
+                  name: couchbase-pv
+                ports:
+                - containerPort: 8091
+                - containerPort: 8092
+                - containerPort: 8093
+                - containerPort: 8094
+                - containerPort: 4369
+                - containerPort: 9100
+                - containerPort: 9101
+                - containerPort: 9102
+                - containerPort: 9103
+                - containerPort: 9104
+                - containerPort: 9105
+                - containerPort: 9998
+                - containerPort: 9999
+                - containerPort: 11207
+                - containerPort: 11209
+                - containerPort: 11210
+                - containerPort: 11211
+                - containerPort: 11214
+                - containerPort: 11215
+                - containerPort: 18091
+                - containerPort: 18092
+                - containerPort: 18903
+              volumes:
+              - name: couchbase-pv
+
+        

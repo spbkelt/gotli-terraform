@@ -1,0 +1,327 @@
+#cloud-config
+coreos:
+  update:
+    reboot-strategy: "etcd-lock"
+  units:
+  - name: update-engine.service
+    command: stop
+  - name: locksmithd.service
+    command: stop
+  - name: kubelet.service
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Kubernetes Kubelet
+      Documentation=https://github.com/kubernetes/kubernetes
+      Requires=kube_install_weave_cni.service
+      After=kube_install_weave_cni.service
+
+      [Service]
+      EnvironmentFile=/etc/environment
+      ExecStartPre=/usr/bin/mkdir -p /etc/kubernetes/manifests
+      ExecStartPre=/usr/bin/mkdir -p /srv/kubernetes/bin
+      ExecStartPre=/usr/bin/curl -fsSL -o /srv/kubernetes/bin/kubelet https://storage.googleapis.com/kubernetes-release/release/v${kubernetes_version}/bin/linux/amd64/kubelet
+      ExecStartPre=/usr/bin/chmod +x /srv/kubernetes/bin/kubelet
+      ExecStartPre=/usr/bin/curl -fSsL -o /srv/kubernetes/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/v${kubernetes_version}/bin/linux/amd64/kubectl
+      ExecStartPre=/usr/bin/chmod +x /srv/kubernetes/bin/kubectl
+      ExecStart=/srv/kubernetes/bin/kubelet \
+      --api-servers=http://127.0.0.1:8080 \
+      --register-node=true \
+      --register-schedulable=false \
+      --allow-privileged=true \
+      --pod-manifest-path=/etc/kubernetes/manifests \
+      --cluster_dns=${service_dns_ip} \
+      --hostname-override=$${COREOS_PRIVATE_IPV4} \
+      --cluster_domain=cluster.local \
+      --cloud-provider=aws \
+      --cni-conf-dir=/etc/cni/net.d \
+      --network-plugin=cni
+
+      TimeoutSec=30
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: "kube_install_weave_cni.service"
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Kubernetes WeaveNet Join CNI
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      ExecStartPre=/usr/bin/mkdir -p /opt/cni/bin
+      ExecStartPre=/usr/bin/mkdir -p /etc/cni/net.d
+      ExecStartPre=/usr/bin/curl -fsSL -o /tmp/cni-amd64-v${cni_plugin_version}.tbz2 https://github.com/containernetworking/cni/releases/download/v${cni_plugin_version}/cni-amd64-v${cni_plugin_version}.tbz2
+      ExecStartPre=/usr/bin/tar xv -f /tmp/cni-amd64-v${cni_plugin_version}.tbz2 -C /opt/cni/bin/
+      ExecStartPre=/usr/bin/curl -L git.io/weave -o /opt/cni/bin/weave
+      ExecStartPre=/usr/bin/chmod a+x  /opt/cni/bin/weave
+      ExecStart=/opt/cni/bin/weave setup
+
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: kube_check_api_readiness.service
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Kubernetes check API health service
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=kubelet.service
+      Wants=kubelet.service
+
+      [Service]
+      ExecStartPre=/usr/bin/systemctl is-active kubelet.service
+      ExecStart=/usr/bin/curl -sL http://localhost:8080/healthz
+
+      TimeoutSec=30
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: kube_get_node_readiness.service
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Kubernetes Weave CNI create daemonset
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=kube_check_api_readiness.service
+      Wants=kube_check_api_readiness.service
+
+      [Service]
+      ExecStart=/bin/bash -c "/srv/kubernetes/bin/kubectl get nodes | grep -v SchedulingDisabled | grep Ready"
+
+      TimeoutSec=5
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: kube_weave_init.service
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Kubernetes Weave CNI create daemonset
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=kube_get_node_readiness.service
+      Requires=kube_get_node_readiness.service
+
+      [Service]
+      ExecStart=/srv/kubernetes/bin/kubectl apply -f ${weave_init_addon_manifest} -n kube-system
+
+      TimeoutSec=5
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: kube_dns_create.service
+    command: "start"
+    enable: true
+    content: |
+      [Unit]
+      Description=Kubernetes DNS
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=kube_weave_init.service
+      Requires=kube_weave_init.service
+
+      [Service]
+      ExecStart=/srv/kubernetes/bin/kubectl apply -f ${kubedns_addon_manifest} -n kube-system
+
+      TimeoutSec=5
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+write_files:
+    - path: /etc/kubernetes/manifests/kube-apiserver.yaml
+      content: |
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: kube-apiserver
+          namespace: kube-system
+        spec:
+          hostNetwork: true
+          containers:
+          - name: kube-apiserver
+            image: gcr.io/google_containers/hyperkube:v${kubernetes_version}
+            imagePullPolicy: IfNotPresent
+            command:
+            - /hyperkube
+            - apiserver
+            - --apiserver-count=${nodes_count}
+            - --insecure-bind-address=0.0.0.0
+            - --insecure-port=8080
+            - --bind-address=${replace("%private_ipv4", "%", "$")}
+            - --secure-port=443
+            - --etcd-servers=${etcd_elb_url}
+            - --allow-privileged=true
+            - --service-cluster-ip-range=${cluster_service_cidr}
+            - --advertise-address=${replace("%private_ipv4", "%", "$")}
+            - --admission-control=NamespaceLifecycle,LimitRanger,ServiceAccount,ResourceQuota
+            - --runtime-config=extensions/v1beta1=true,extensions/v1beta1/networkpolicies=true
+            - --service-account-key-file=/etc/ssl/certs/ca-key.pem
+            - --tls-ca-file=/etc/ssl/certs/ca.pem
+            - --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem
+            - --tls-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
+            - --token-auth-file=/etc/kubernetes/known_tokens.csv
+            - --authorization-mode=ABAC
+            - --authorization-policy-file=/etc/kubernetes/authorization-policy.jsonl
+            ports:
+            - containerPort: 8080
+              name: local
+            - containerPort: 443
+              name: https
+            volumeMounts:
+            - mountPath: /etc/kubernetes
+              name: kubernetes-config
+              readOnly: true
+            - mountPath: /etc/ssl/certs
+              name: ssl-certs-host
+              readOnly: true
+          volumes:
+          - hostPath:
+              path: /etc/kubernetes
+            name: kubernetes-config
+          - hostPath:
+              path: /etc/ssl/certs/
+            name: ssl-certs-host
+    - path: /etc/kubernetes/manifests/kube-controller-manager.yaml
+      content: |
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: kube-controller-manager
+          namespace: kube-system
+        spec:
+          hostNetwork: true
+          containers:
+          - name: kube-controller-manager
+            image: gcr.io/google_containers/hyperkube:v${kubernetes_version}
+            imagePullPolicy: IfNotPresent
+            command:
+            - /hyperkube
+            - controller-manager
+            - --master=http://127.0.0.1:8080
+            - --leader-elect=true
+            - --service-account-private-key-file=/etc/ssl/certs/ca-key.pem
+            - --cluster-signing-cert-file=/etc/ssl/certs/ca.pem
+            - --cluster-signing-key-file=/etc/ssl/certs/ca-key.pem
+            - --root-ca-file=/etc/ssl/certs/ca.pem
+            - --cloud-provider=aws
+            livenessProbe:
+              httpGet:
+                host: 127.0.0.1
+                path: /healthz
+                port: 10252
+              initialDelaySeconds: 15
+              timeoutSeconds: 1
+            volumeMounts:
+            - mountPath: /etc/kubernetes/ssl
+              name: ssl-certs-kubernetes
+              readOnly: true
+            - mountPath: /etc/ssl/certs
+              name: ssl-certs-host
+              readOnly: true
+          volumes:
+          - hostPath:
+              path: /etc/kubernetes/ssl
+            name: ssl-certs-kubernetes
+          - hostPath:
+              path: /etc/ssl/certs/
+            name: ssl-certs-host
+    - path: /etc/kubernetes/manifests/kube-scheduler.yaml
+      content: |
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: kube-scheduler
+          namespace: kube-system
+        spec:
+          hostNetwork: true
+          containers:
+          - name: kube-scheduler
+            image: gcr.io/google_containers/hyperkube:v${kubernetes_version}
+            imagePullPolicy: IfNotPresent
+            command:
+            - /hyperkube
+            - scheduler
+            - --master=http://127.0.0.1:8080
+            - --leader-elect=true
+            livenessProbe:
+              httpGet:
+                host: 127.0.0.1
+                path: /healthz
+                port: 10251
+              initialDelaySeconds: 15
+              timeoutSeconds: 1
+    - path: /etc/kubernetes/manifests/kube-proxy.yaml
+      content: |
+         apiVersion: v1
+         kind: Pod
+         metadata:
+           name: kube-proxy
+           namespace: kube-system
+         spec:
+           hostNetwork: true
+           containers:
+           - name: kube-proxy
+             image: gcr.io/google_containers/hyperkube:v${kubernetes_version}
+             command:
+             - /hyperkube
+             - proxy
+             - --master=http://127.0.0.1:8080
+             - --bind-address=${replace("%private_ipv4", "%", "$")}
+             securityContext:
+              privileged: true
+             volumeMounts:
+             - mountPath: /etc/ssl/certs
+               name: "ssl-certs"
+             - mountPath: /etc/kubernetes
+               name: "kubeconfig"
+               readOnly: true
+             - mountPath: /etc/kubernetes/ssl
+               name: "etc-kube-ssl"
+               readOnly: true
+           volumes:
+           - name: "ssl-certs"
+             hostPath:
+               path: "/etc/ssl/certs"
+           - name: "kubeconfig"
+             hostPath:
+               path: "/etc/kubernetes"
+           - name: "etc-kube-ssl"
+             hostPath:
+               path: "/etc/kubernetes/ssl"
+    - path: /etc/kubernetes/addons/kube-dns-config-map.yaml
+      content: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: kube-dns
+            namespace: kube-system
+          data:
+            federations: federation-cluster=cluster.local
+
+    - path: /etc/kubernetes/authorization-policy.jsonl
+      content: |
+         {"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"user": "*", "nonResourcePath": "*", "readonly": true}}
+         {"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"user": "scheduler","namespace": "*", "resource": "*", "apiGroup": "*"}}
+         {"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"user": "kubelet", "namespace": "*", "resource": "*", "apiGroup": "*"}}
+         {"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"group": "system:serviceaccounts", "namespace": "*", "resource": "*", "apiGroup": "*", "nonResourcePath": "*"}}
+         {"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"user":"user","namespace":"<user_allowed_namespace>","resource":"*","apiGroup":"*","nonResourcePath":"*"}}
+         {"apiVersion": "abac.authorization.kubernetes.io/v1beta1", "kind": "Policy", "spec": {"user":"admin","namespace":"*","resource":"*","apiGroup":"*","nonResourcePath":"*"}}

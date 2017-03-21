@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    name: couchbase
+  name: couchbase
+  namespace: default
+spec:
+  ports:
+  - name: admin
+    port: 8091
+    protocol: TCP
+    targetPort: 8091
+  - name: views
+    port: 8092
+    protocol: TCP
+    targetPort: 8092
+  - name: "8093"
+    port: 8093
+    protocol: TCP
+    targetPort: 8093
+  - name: "8094"
+    port: 8094
+    protocol: TCP
+    targetPort: 8094
+  - name: peers
+    port: 11210
+    protocol: TCP
+    targetPort: 11210
+  - name: "4369"
+    port: 4369
+    protocol: TCP
+    targetPort: 4369
+  - name: "11207"
+    port: 11207
+    protocol: TCP
+    targetPort: 11207
+  - name: "11209"
+    port: 11209
+    protocol: TCP
+    targetPort: 11209
+  - name: "11211"
+    port: 11211
+    protocol: TCP
+    targetPort: 11211
+  - name: "11214"
+    port: 11214
+    protocol: TCP
+    targetPort: 11214
+  - name: "11215"
+    port: 11215
+    protocol: TCP
+    targetPort: 11215
+  - name: "18091"
+    port: 18091
+    protocol: TCP
+    targetPort: 18091
+  - name: "18092"
+    port: 18092
+    protocol: TCP
+    targetPort: 18092
+  - name: "18093"
+    port: 18093
+    protocol: TCP
+    targetPort: 18093
+  - name: "9101"
+    port: 9101
+    protocol: TCP
+    targetPort: 9101
+  - name: "9102"
+    port: 9102
+    protocol: TCP
+    targetPort: 9102
+  - name: "9103"
+    port: 9103
+    protocol: TCP
+    targetPort: 9103
+  - name: "9104"
+    port: 9104
+    protocol: TCP
+    targetPort: 9104
+  - name: "9105"
+    port: 9105
+    protocol: TCP
+    targetPort: 9105
+  - name: "9998"
+    port: 9998
+    protocol: TCP
+    targetPort: 9998
+  - name: "9999"
+    port: 9999
+    protocol: TCP
+    targetPort: 9999
+  selector:
+    app: couchbase
+  type: ClusterIP
